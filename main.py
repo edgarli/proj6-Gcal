@@ -39,10 +39,8 @@ APPLICATION_NAME = 'MeetMe class project'
 @app.route("/")
 @app.route("/index")
 def index():
-  app.logger.debug("Entering index")
-  if 'begin_date' not in flask.session:
-    init_session_values()
-  return render_template('index.html')
+    app.logger.debug("Entering index")
+    return flask.redirect(flask.url_for('choose'))
 
 @app.route("/choose")
 def choose():
@@ -51,6 +49,8 @@ def choose():
     ## to pull it back here because the redirect has to be a
     ## 'return' 
     app.logger.debug("Checking credentials for Google calendar access")
+    if 'daterange' not in flask.session:
+        init_session_values()
     credentials = valid_credentials()
     if not credentials:
       app.logger.debug("Redirecting to authorization")
@@ -59,7 +59,11 @@ def choose():
     gcal_service = get_gcal_service(credentials)
     app.logger.debug("Returned from get_gcal_service")
     flask.session['calendars'] = list_calendars(gcal_service)
-    return render_template('index.html')
+    if len(flask.session['calendars']) > 0 and not flask.session.get('calid'):
+        flask.session['calid'] = flask.session['calendars'][0]['id']
+    flask.session['events'] = list_events(gcal_service)
+    free_times, busy_times = split_times()
+    return render_template('index.html', free_times=free_times, busy_times=busy_times)
 
 ####
 #
@@ -177,23 +181,31 @@ def oauth2callback():
 #
 #####
 
-@app.route('/setrange', methods=['POST'])
-def setrange():
+@app.route('/set', methods=['POST'])
+def set():
     """
     User chose a date range with the bootstrap daterange
     widget.
     """
-    app.logger.debug("Entering setrange")  
-    flask.flash("Setrange gave us '{}'".format(
-      request.form.get('daterange')))
+    app.logger.debug("Entering set")
+    # set calid and datetime
+    calid = request.form.get('calid')
     daterange = request.form.get('daterange')
+    begin_time = request.form.get('begin_time')
+    end_time = request.form.get('end_time')
+
+    flask.session['calid'] = calid
     flask.session['daterange'] = daterange
-    daterange_parts = daterange.split()
-    flask.session['begin_date'] = interpret_date(daterange_parts[0])
-    flask.session['end_date'] = interpret_date(daterange_parts[2])
-    app.logger.debug("Setrange parsed {} - {}  dates as {} - {}".format(
-      daterange_parts[0], daterange_parts[1], 
-      flask.session['begin_date'], flask.session['end_date']))
+    flask.session["begin_time"] = begin_time
+    flask.session["end_time"] = end_time
+    daterange = flask.session['daterange']
+    begin_time = flask.session['begin_time']
+    end_time = flask.session['end_time']
+    arr = daterange.split()
+    flask.session['begin'] = '%s' % (arrow.get('%sT%s' % (arr[0], begin_time), 'MM/DD/YYYYTHH:mm').replace(tzinfo=tz.tzlocal()))
+    flask.session['end'] = '%s' % (arrow.get('%sT%s' % (arr[2], end_time),'MM/DD/YYYYTHH:mm').replace(tzinfo=tz.tzlocal()))
+    app.logger.debug("Set calid=%s, daterange=%s, begin_time=%s', end_time=%s",calid, daterange, begin_time, end_time)
+    
     return flask.redirect(flask.url_for("choose"))
 
 ####
@@ -211,14 +223,15 @@ def init_session_values():
     now = arrow.now('local')
     tomorrow = now.replace(days=+1)
     nextweek = now.replace(days=+7)
-    flask.session["begin_date"] = tomorrow.floor('day').isoformat()
-    flask.session["end_date"] = nextweek.ceil('day').isoformat()
     flask.session["daterange"] = "{} - {}".format(
         tomorrow.format("MM/DD/YYYY"),
         nextweek.format("MM/DD/YYYY"))
     # Default time span each day, 8 to 5
-    flask.session["begin_time"] = interpret_time("9am")
-    flask.session["end_time"] = interpret_time("5pm")
+    #flask.session["begin_time"] = interpret_time("9am")
+    #flask.session["end_time"] = interpret_time("5pm")
+    flask.session["begin_time"] = "09:00"
+    flask.session["end_time"] = "17:00"
+    cal_timerange()
 
 def interpret_time( text ):
     """
@@ -289,16 +302,73 @@ def list_calendars(service):
         selected = ("selected" in cal) and cal["selected"]
         primary = ("primary" in cal) and cal["primary"]
         
-
-        result.append(
-          { "kind": kind,
+        """
+        events = service.events().list(calendarId=id).execute()
+        """
+        result.append({ "kind": kind,
             "id": id,
             "summary": summary,
             "selected": selected,
-            "primary": primary
-            })
+            "primary": primary,
+            "desc": desc,
+        })
     return sorted(result, key=cal_sort_key)
 
+def list_events(service):
+    """
+    Given a google 'service' object, return a list of events of calendar.  
+    """
+    app.logger.debug("Entering list_events")
+    calid = flask.session.get('calid')
+    if not calid:
+        return []
+    timeMin = flask.session['begin']
+    timeMax = flask.session['end']
+    event_list = service.events().list(calendarId=calid, timeMin=timeMin,
+            timeMax=timeMax).execute()["items"]
+    result = []
+    for event in event_list:
+        result.append({
+            "summary": event["summary"],
+            "start": '%s' % arrow.get(event["start"]["dateTime"]),
+            "end": '%s' % arrow.get(event["end"]["dateTime"]),
+        })
+    app.logger.debug("list_events: %s", result);
+    result.sort(key=lambda x: x["start"])
+    return result
+
+def cal_timerange():
+    daterange = flask.session['daterange']
+    begin_time = flask.session['begin_time']
+    end_time = flask.session['end_time']
+    arr = daterange.split()
+    flask.session['begin'] = '%s' % (arrow.get('%sT%s' % (arr[0], begin_time), 
+            'MM/DD/YYYYTH:mm').replace(tzinfo=tz.tzlocal()))
+    flask.session['end'] = '%s' % (arrow.get('%sT%s' % (arr[2], end_time),
+            'MM/DD/YYYYTH:mm').replace(tzinfo=tz.tzlocal()))
+
+def split_times():
+    """
+    split daterange with events
+    """
+    begin = arrow.get(flask.session['begin'])
+    end = arrow.get(flask.session['end'])
+    free_times = []
+    busy_times = []
+    events = flask.session['events']
+    for event in events:
+        st = arrow.get(event["start"])
+        et = arrow.get(event["end"])
+        busy_times.append('%s - %s : %s' % (st.format('ddd MM/DD/YYYY H:mm'),
+            et.format('ddd MM/DD/YYYY H:mm'), event["summary"]))
+        if begin < et:
+            free_times.append('%s - %s' %(begin.format('ddd MM/DD/YYYY H:mm'),
+                st.format('ddd MM/DD/YYYY H:mm')))
+            begin = et
+    if begin < end:
+        free_times.append('%s - %s' %(begin.format('ddd MM/DD/YYYY H:mm'),
+            end.format('ddd MM/DD/YYYY H:mm')))
+    return free_times, busy_times
 
 def cal_sort_key( cal ):
     """
