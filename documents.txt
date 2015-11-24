@@ -1,0 +1,10 @@
+The first one is a samplest test to test the function work right.
+The second one test two adjacent events
+The third one test multi non-adjacent events
+The 4th one test multi non-adjacent events
+The 5th one test the first event at the begin of daterange
+The 6th one test the last event at the end of daterange
+The 7th one test the first event and the last event out of the bound of daterange
+The 8th one test no events
+The 9th one test daterange with cross date
+The 10th one test daterange with cross date, and events cross date
